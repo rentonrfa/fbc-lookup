@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fire Benefit Charge Lookup</title>
+<!-- Public FBC parcel lookup, built to be embedded in rentonrfa.com with an iframe.
+     Reads lookup.json beside it (written by the FBC_DB tools refresh). That file carries no owner
+     name, phone, email, notes, staff names, senior-discount flag, account number, hazard class or
+     billed/exempt status. -->
+<style>
+:root{--bg:#ffffff;--ink:#1d2a33;--muted:#5d6c76;--line:#d4dce1;--accent:#a8361b;--soft:#f3f6f7;--warn:#fbefd2;--warnink:#7a4f00;
+  --font:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 var(--font)}
+.wrap{max-width:760px;margin:0 auto;padding:16px;display:grid;gap:14px}
+h1{font-size:1.35rem;margin:0}
+.sub{color:var(--muted);font-size:.9rem;margin:0}
+form{display:flex;gap:8px;flex-wrap:wrap}
+label{flex-basis:100%;font-size:.85rem;color:var(--muted)}
+input{flex:1 1 240px;min-width:0;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:6px}
+button{font:600 1rem var(--font);padding:10px 18px;border:0;border-radius:6px;background:var(--accent);color:#fff;cursor:pointer}
+input:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.notice{background:var(--warn);color:var(--warnink);border-radius:6px;padding:10px 12px;font-size:.9rem}
+.list{display:grid;gap:6px}
+.pick{display:flex;justify-content:space-between;gap:10px;text-align:left;width:100%;background:var(--soft);color:var(--ink);font-weight:400;border:1px solid var(--line)}
+.card{border:1px solid var(--line);border-radius:8px;padding:16px;display:grid;gap:10px}
+.amt{font-size:2rem;font-weight:700;font-variant-numeric:tabular-nums}
+.delta{color:var(--muted);font-size:.9rem}
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;margin:0;font-size:.95rem}
+dt{color:var(--muted)}
+dd{margin:0;overflow-wrap:anywhere}
+.help{background:var(--soft);border-radius:6px;padding:12px;font-size:.9rem}
+.mono{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>Look up your Fire Benefit Charge</h1>
+    <p class="sub" id="sub">Loading the charge list…</p>
+  </div>
+  <div class="notice" id="draft" hidden></div>
+  <form id="f">
+    <label for="q">Parcel number or street address</label>
+    <input id="q" autocomplete="off" placeholder="e.g. 2423049120 or 555 Monster Rd">
+    <button type="submit">Look up</button>
+  </form>
+  <div id="out" aria-live="polite"></div>
+  <div class="help">Questions or think your charge is wrong? Call the Fire Benefit Charge office at
+    <b class="mono">425-988-4939</b>. Requests for review of the <span id="yr2">upcoming</span> charge are due by <b>January 31</b>.</div>
+</div>
+<script>
+var DATA=null, IDX={}, MAJ={}, A=1, TOK=[], KEY=[];
+var STATUS={hearing:"This is the proposed charge going to the Board of Fire Commissioners. It may change before it is final in March.",
+            draft:"This charge list is a working draft and may change."};
+function money(x){return x==null?"—":"$"+x.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2})}
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]})}
+function norm(s){return String(s||"").toUpperCase().replace(/[^A-Z0-9 ]/g," ").replace(/\s+/g," ").trim()}
+// Address words in any order, spelled out or abbreviated: "600 NW 3rd Court" finds "600 3RD CT NW RENTON 98055".
+var SAME={STREET:"ST",AVENUE:"AVE",AV:"AVE",COURT:"CT",PLACE:"PL",ROAD:"RD",DRIVE:"DR",LANE:"LN",BOULEVARD:"BLVD",
+  CIRCLE:"CIR",TERRACE:"TER",PARKWAY:"PKWY",HIGHWAY:"HWY",LOOP:"LOOP",WY:"WAY",NORTH:"N",SOUTH:"S",EAST:"E",WEST:"W",
+  NORTHEAST:"NE",NORTHWEST:"NW",SOUTHEAST:"SE",SOUTHWEST:"SW",SPACE:"SP",FIRST:"1",SECOND:"2",THIRD:"3",FOURTH:"4",
+  FIFTH:"5",SIXTH:"6",SEVENTH:"7",EIGHTH:"8",NINTH:"9",TENTH:"10",ELEVENTH:"11",TWELFTH:"12",THIRTEENTH:"13",
+  FOURTEENTH:"14",FIFTEENTH:"15",SIXTEENTH:"16",SEVENTEENTH:"17",EIGHTEENTH:"18",NINETEENTH:"19",TWENTIETH:"20"};
+var SKIP={RENTON:1,WA:1,WASHINGTON:1,USA:1};
+// Mailing city, state and ZIP at the end never decide a match (8,700 records say "KING COUNTY" there).
+var TAIL=/ (MAPLE VALLEY|FALL CITY|FEDERAL WAY|KING COUNTY|RENTON|KENT|NEWCASTLE|SEATTLE|TUKWILA|BELLEVUE|WA|WASHINGTON|USA|98\d{3})$/,
+    STATE=/ (WA|WASHINGTON|USA|98\d{3})$/;
+function words(s,keepCity){
+  var tail=keepCity?STATE:TAIL; s=norm(s); while(tail.test(s))s=s.replace(tail,"");
+  var t=s.split(" ").map(function(w){return SAME[w]||w}), out=[];
+  t.forEach(function(w,k){
+    if(!w||(k>0&&((SKIP[w]&&!(keepCity&&w==="RENTON"))||/^98\d{3}$/.test(w))))return;
+    w=w.replace(/^(\d+)(ST|ND|RD|TH)$/,"$1");                          // 3RD = 3 = THIRD
+    var p=out[out.length-1];
+    if(/^[EW]$/.test(w)&&(p==="N"||p==="S")){out[out.length-1]=p+w;return}   // N W = NW, North East = NE
+    out.push(w);
+  });
+  return out;
+}
+function matches(q,t){
+  if(/^\d/.test(q[0])&&t[0]!==q[0])return false;                    // the house number must be the house number
+  return q.every(function(w,k){
+    return t.indexOf(w)>-1||(k===q.length-1&&t.some(function(x){return x.indexOf(w)===0}));   // last word may be partly typed
+  });
+}
+function row(i){var r=DATA.rows[i],o={};DATA.cols.forEach(function(c,k){o[c]=r[k]});return o}
+function resize(){try{parent.postMessage({fbcLookupHeight:document.documentElement.scrollHeight},"*")}catch(e){}}
+function show(html){document.getElementById("out").innerHTML=html;resize()}
+function card(i,note){
+  var r=row(i), d=(r.prior_charge==null)?null:r.charge-r.prior_charge;
+  var kv=[["Parcel",r.parcel],["Address",r.address]];
+  if(r.park)kv.push(["Park",r.park]);
+  kv.push(["Property class",r["class"]],["Square feet billed",r.sqft==null?"—":r.sqft.toLocaleString()]);
+  if(r.sprinkler)kv.push(["Sprinkler discount",r.sprinkler]);
+  if(r.alarm)kv.push(["Alarm discount",r.alarm]);
+  var delta=d==null?"No "+(Number(DATA.bill_yr)-1)+" charge on file for this property."
+    :(Number(DATA.bill_yr)-1)+" charge: "+money(r.prior_charge)+(r.prior_sqft!=null&&r.prior_sqft!==r.sqft?" on "+r.prior_sqft.toLocaleString()+" sq ft":"");
+  show('<div class="card"><span class="sub">'+esc(DATA.bill_yr)+' Fire Benefit Charge</span><span class="amt">'+money(r.charge)+'</span>'+
+    '<span class="delta">'+esc(delta)+'</span>'+(note?'<span class="delta">'+esc(note)+'</span>':'')+'<dl>'+kv.map(function(p){return "<dt>"+esc(p[0])+"</dt><dd>"+esc(p[1])+"</dd>"}).join("")+'</dl></div>');
+}
+// When the charge list has no exact match, ask King County's public address records (no key, no cost):
+// address -> official address point -> the parcel there + whether it is inside the RFA boundary.
+// Only the typed address is sent. If King County is slow or down, the local result above stands.
+var KC="https://gismaps.kingcounty.gov/arcgis/rest/services/", SEQ=0;
+function kc(path,params){
+  var u=KC+path+"?f=json&"+Object.keys(params).map(function(k){return k+"="+encodeURIComponent(params[k])}).join("&");
+  var ctl=window.AbortController?new AbortController():null, t=setTimeout(function(){if(ctl)ctl.abort()},8000);
+  return fetch(u,ctl?{signal:ctl.signal}:{}).then(function(r){clearTimeout(t);if(!r.ok)throw new Error(r.status);return r.json()})
+    .then(function(d){if(!d||d.error)throw new Error("county error");return d});
+}
+function at(layer,c,field){
+  return kc(layer+"/query",{geometry:c.location.x+","+c.location.y,geometryType:"esriGeometryPoint",inSR:4326,
+    spatialRel:"esriSpatialRelIntersects",outFields:field,returnGeometry:false})
+    .then(function(d){if(!Array.isArray(d.features))throw new Error("county error");return d.features.map(function(f){return f.attributes[field]})});
+}
+function county(raw,w,mine,had){
+  var out=document.getElementById("out");
+  out.insertAdjacentHTML("beforeend",'<p class="sub" id="kcs">Checking King County address records…</p>');resize();
+  function done(){var e=document.getElementById("kcs");if(e)e.remove();resize()}
+  kc("Address/KingCo_ParcelAddress_locator/GeocodeServer/findAddressCandidates",
+     {SingleLine:raw,outFields:"Addr_type,Match_addr",outSR:4326,maxLocations:5}).then(function(d){
+    var c=(d.candidates||[]).filter(function(c){return c.score>=90&&/^(PointAddress|Subaddress)$/.test(c.attributes.Addr_type)});
+    if(!c.length)return null;
+    var top=Math.max.apply(null,c.map(function(c){return c.score}));
+    c=c.filter(function(c){return c.score===top});
+    if(c.length!==1)return null;          // two equally good address points: don't guess (SE 143RD PL scores above 143RD PL SE)
+    c=c[0];
+    // Without a city the locator can jump towns (901 NE SUNSET BLVD -> 901 SUNSET WAY, Bellevue), so every
+    // word typed, city included, must be in the address it found, whole (123 MAIN ST is not 123 MAIN STRASSE).
+    var typed=words(raw,true), found=words(c.attributes.Match_addr,true);
+    if(typed[0]!==found[0]||!typed.every(function(x){return found.indexOf(x)>-1}))return null;
+    return Promise.all([at("Property/KingCo_Parcels/MapServer/0",c,"PIN"),at("Districts/KingCo_Electoral_Districts/MapServer/15",c,"RFADST")])
+      .then(function(r){return {addr:c.attributes.Match_addr,rfa:r[1].indexOf("RRFA")>-1,
+        unknown:r[1].some(function(v){return !v}),                         // a blank district is not "outside"
+        pins:r[0].filter(function(p){return /^\d{10}$/.test(p)})}});      // only real parcel numbers count
+  }).then(function(g){
+    if(mine!==SEQ)return;
+    if(!g){done();return}
+    var rows=[];
+    g.pins.forEach(function(p){
+      (IDX[p]||[]).forEach(function(i){rows.push(i)});
+      // A condo's address point sits on the building's common parcel (minor 0000); the units are billed
+      // under their own parcel numbers in the same major, so take the units at this address.
+      if(/0000$/.test(p))(MAJ[p.slice(0,6)]||[]).forEach(function(i){if(rows.indexOf(i)<0&&matches(w,TOK[i]))rows.push(i)});
+    });
+    var said="King County's address records match this to "+g.addr+".";
+    if(rows.length===1){card(rows[0],said);return}
+    if(rows.length>1){
+      var fit=rows.filter(function(i){return matches(w,TOK[i])}), rest=rows.filter(function(i){return fit.indexOf(i)<0});
+      if(fit.length===1){card(fit[0],said);return}
+      list(fit.concat(rest),esc(said)+" That parcel has "+rows.length+" accounts. Pick yours:");return}
+    // Inside the RFA but not matched to a billed parcel: say "no charge" only for a real, non-condo parcel the
+    // book was checked against, and never over local matches.
+    if(g.rfa&&(had||!g.pins.length||g.pins.some(function(p){return /0000$/.test(p)}))){done();return}
+    // "Outside" only when the person named the town or ZIP: without one, "123 MAIN ST" is a guess among several towns.
+    var parts=String(g.addr).split(","), town=parts.length>3?norm(parts[1]):"", zip=(String(g.addr).match(/\b98\d{3}\b/)||[""])[0],
+        typedN=" "+norm(raw)+" ", named=(town&&typedN.indexOf(" "+town+" ")>-1)||(zip&&typedN.indexOf(" "+zip+" ")>-1);
+    if(!g.rfa&&(!named||g.unknown)){done();return}
+    if(!g.rfa){show('<div class="notice">King County places '+esc(g.addr)+' outside the Renton Regional Fire Authority service area, so it has no RFA Fire Benefit Charge.</div>');return}
+    show('<div class="notice">'+esc(g.addr)+' is inside the Renton Regional Fire Authority service area but has no Fire Benefit Charge on the '+esc(DATA.bill_yr)+
+      ' list. Most often that means the parcel has no building on it. If you think that is wrong, call 425-988-4939.</div>');
+  }).catch(function(){if(mine===SEQ)done()});
+}
+function list(hits,head){
+  show('<p class="sub">'+head+'</p><div class="list">'+
+    hits.slice(0,25).map(function(i){var r=row(i);return '<button class="pick" data-i="'+i+'"><span>'+esc(r.address)+(r.park?" · "+esc(r.park):"")+'</span><span class="mono">'+esc(r["class"])+(r.sqft?" · "+r.sqft.toLocaleString()+" sq ft":"")+" · "+esc(r.parcel)+'</span></button>'}).join("")+'</div>');
+}
+function search(){
+  if(!DATA)return;
+  var q=norm(document.getElementById("q").value); if(!q){SEQ++;show("");return}
+  var digits=q.replace(/ /g,""), hits=[], exactOne=false, inexact=false, w=null;
+  if(/^\d+$/.test(digits))hits=IDX[digits]||(digits.length<10&&IDX[("0000000000"+digits).slice(-10)])||[];
+  if(!hits.length&&q.length>=4){
+    // Word order matters on the county grid (SE 143RD PL and 143RD PL SE are different streets), so only the
+    // same words in the same order open a card; same words reordered, then partial matches, come as a list.
+    w=words(q); var o=w.join(" "), k=w.slice().sort().join(" "), same=[], moved=[], near=[];
+    if(w.length)for(var i=0;i<DATA.rows.length;i++){if(matches(w,TOK[i]))(TOK[i].join(" ")===o?same:KEY[i]===k?moved:near).push(i)}
+    hits=same.concat(moved,near); exactOne=same.length===1; inexact=!same.length&&moved.length>0;
+  }
+  var addr=w&&w.length>1&&/^\d/.test(w[0])&&!/^\d+$/.test(digits), raw=document.getElementById("q").value;
+  var direct=exactOne||hits.length===1&&!inexact&&!addr;
+  if(!direct&&addr){SEQ++;var mine=SEQ;   // render the local answer now, refine it below
+    var had=hits.length; setTimeout(function(){if(mine===SEQ)county(raw,w,mine,had)},0)}else SEQ++;
+  if(!hits.length){show('<div class="notice">Nothing matches “'+esc(document.getElementById("q").value)+'”. Check the house number and street name, or try the 10-digit parcel number. '+
+    'Only properties in the Renton Regional Fire Authority service area have this charge. If your property is outside it, you do not owe it. '+
+    'To find a parcel number, use the <a href="https://gismaps.kingcounty.gov/parcelviewer2/" target="_blank" rel="noopener">King County Parcel Viewer</a>.</div>');return}
+  if(direct){card(hits[0]);return}
+  list(hits,inexact?"No exact match for that address. Is it one of these?":hits.length>25?"More than 25 matches. Add more of the address, or pick one:":hits.length+" matches. Pick one:");
+}
+document.getElementById("f").addEventListener("submit",function(e){e.preventDefault();search()});
+document.getElementById("out").addEventListener("click",function(e){var b=e.target.closest(".pick");if(b){SEQ++;card(Number(b.dataset.i))}});
+fetch("lookup.json",{cache:"no-cache"}).then(function(r){if(!r.ok)throw new Error(r.status);return r.json()}).then(function(d){
+  if(!d||!Array.isArray(d.rows)||!d.rows.length||d.rows.length!==d.count)throw new Error("bad file");
+  DATA=d; A=d.cols.indexOf("address");
+  var P=d.cols.indexOf("parcel");
+  d.rows.forEach(function(r,i){var k=r[P];if(k){(IDX[k]=IDX[k]||[]).push(i);(MAJ[k.slice(0,6)]=MAJ[k.slice(0,6)]||[]).push(i)}var t=words(r[A]);TOK.push(t);KEY.push(t.slice().sort().join(" "))});
+  document.getElementById("sub").textContent=d.bill_yr+" charges · updated "+d.as_of;
+  document.getElementById("yr2").textContent=d.bill_yr;
+  if(STATUS[d.status]){var n=document.getElementById("draft");n.textContent=STATUS[d.status];n.hidden=false}
+  var q0=new URLSearchParams(location.search).get("q");
+  if(q0){document.getElementById("q").value=q0;search()}
+  resize();
+}).catch(function(){
+  document.getElementById("sub").textContent="";
+  show('<div class="notice">The charge list could not be loaded right now. Please try again later, or call 425-988-4939.</div>');
+});
+window.addEventListener("resize",resize);
+</script>
+</body>
+</html>
